@@ -83,6 +83,8 @@
   .worker-row:hover { background: #1f1f1f; }
   .worker-num { font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #888; width: 18px; }
   .worker-name { flex: 1; font-size: 15px; }
+  /* Hidden class for blank names */
+  .worker-row.hidden-worker { display: none; }
   .check-box {
     width: 32px; height: 32px; border: 2px solid #2e2e2e;
     display: flex; align-items: center; justify-content: center;
@@ -232,7 +234,7 @@
 </nav>
 
 <script>
-// ====================== FIREBASE CONFIGURATION (KEPT FROM ORIGINAL) ======================
+// ====================== FIREBASE CONFIGURATION ======================
 const FIREBASE_CONFIG = {
   apiKey: 'AIzaSyDqp_twy2X4lxTrKsMrB3EIs8DYzlVfJ-8',
   databaseURL: 'https://workers-27d2f-default-rtdb.europe-west1.firebasedatabase.app/'
@@ -251,6 +253,7 @@ let reportMonth = new Date();
 // ====================== HELPERS ======================
 function fmtDateShort(str) { const d=new Date(str+'T12:00:00'); return d.toLocaleDateString('en-US',{month:'short',day:'numeric'}); }
 function fmtFullDate(str) { const d=new Date(str+'T12:00:00'); return d.toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'}); }
+function getDayNumber(str) { const d=new Date(str+'T12:00:00'); return d.getDate(); }
 
 // ====================== PERSISTENCE ======================
 function persistToLocal() { localStorage.setItem('wt_state_v2', JSON.stringify(state)); }
@@ -267,7 +270,6 @@ async function syncToFirebase() {
       method: 'PUT', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(payload)
     });
-    console.log("Firebase sync complete");
   } catch(e){ console.warn("Firebase save error",e); }
 }
 
@@ -305,41 +307,64 @@ function renderHeader() {
   document.getElementById('hdr-weekday').textContent = d.toLocaleDateString('en-US',{weekday:'long'});
 }
 
+// Check if a name should be considered "blank" (empty or just whitespace)
+function isBlankName(name) { return !name || name.trim() === ''; }
+
 function renderWorkers() {
   const container = document.getElementById('workers-list');
   if(!container) return;
   if(!state.checks[state.currentDate]) state.checks[state.currentDate] = new Array(state.names.length).fill(false);
   const cur = state.checks[state.currentDate];
-  container.innerHTML = state.names.map((name, i)=>`
-    <div class="worker-row">
-      <span class="worker-num">${i+1}</span>
-      <span class="worker-name">${escapeHtml(name)}</span>
+  
+  // Filter out blank names - only show non-blank workers
+  const visibleWorkers = [];
+  for(let i = 0; i < state.names.length; i++) {
+    if(!isBlankName(state.names[i])) {
+      visibleWorkers.push({ index: i, name: state.names[i] });
+    }
+  }
+  
+  if(visibleWorkers.length === 0) {
+    container.innerHTML = `<div class="empty-state" style="padding:40px; text-align:center;">No workers added. Go to Settings to add names.</div>`;
+    return;
+  }
+  
+  container.innerHTML = visibleWorkers.map((worker, displayIdx) => {
+    const checked = cur[worker.index] ? 'checked' : '';
+    return `
+    <div class="worker-row" data-worker-index="${worker.index}">
+      <span class="worker-num">${displayIdx+1}</span>
+      <span class="worker-name">${escapeHtml(worker.name)}</span>
       <div class="check-wrap">
-        <div class="check-box ${cur[i] ? 'checked':''}" onclick="toggleCheck(${i})" id="chk-${i}">
+        <div class="check-box ${checked}" onclick="toggleCheck(${worker.index})" id="chk-${worker.index}">
           <span class="tick">✓</span>
         </div>
       </div>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
 }
 
-function toggleCheck(i){
+function toggleCheck(originalIndex){
   if(!state.checks[state.currentDate]) state.checks[state.currentDate] = new Array(state.names.length).fill(false);
-  state.checks[state.currentDate][i] = !state.checks[state.currentDate][i];
-  const box = document.getElementById(`chk-${i}`);
-  if(box) box.classList.toggle('checked', state.checks[state.currentDate][i]);
+  state.checks[state.currentDate][originalIndex] = !state.checks[state.currentDate][originalIndex];
+  const box = document.getElementById(`chk-${originalIndex}`);
+  if(box) box.classList.toggle('checked', state.checks[state.currentDate][originalIndex]);
   saveFullState();
 }
 
 function saveDay(){
   const checks = state.checks[state.currentDate] || new Array(state.names.length).fill(false);
-  const workedCount = checks.filter(v=>v===true).length;
+  // Count only non-blank workers that worked
+  let workedCount = 0;
+  for(let i = 0; i < state.names.length; i++) {
+    if(!isBlankName(state.names[i]) && checks[i]) workedCount++;
+  }
   state.saves[state.currentDate] = {
     date: state.currentDate,
     names: [...state.names],
     checks: [...checks],
     savedAt: new Date().toISOString(),
-    workedCount
+    workedCount: workedCount
   };
   saveFullState();
   const statusDiv = document.getElementById('save-status');
@@ -354,15 +379,20 @@ function renderSettings(){
   if(wrap) wrap.innerHTML = state.names.map((name,i)=>`
     <div class="name-edit-row">
       <span>${i+1}</span>
-      <input type="text" id="name-edit-${i}" value="${escapeHtml(name)}" placeholder="Worker ${i+1}">
+      <input type="text" id="name-edit-${i}" value="${escapeHtml(name)}" placeholder="Leave blank to hide this worker">
     </div>
   `).join('');
   updateDriveUI();
 }
 
 function saveNames(){
-  const newNames = state.names.map((_,i)=> document.getElementById(`name-edit-${i}`)?.value.trim() || DEFAULT_NAMES[i]);
+  const newNames = state.names.map((_,i)=> {
+    const val = document.getElementById(`name-edit-${i}`)?.value || '';
+    return val; // Keep blank as empty string
+  });
   state.names = newNames;
+  
+  // Clean up checks and saves for blank names (keep data but they won't display)
   for(let d in state.checks){
     if(state.checks[d] && state.checks[d].length !== state.names.length){
       const old = state.checks[d];
@@ -378,15 +408,24 @@ function saveNames(){
       for(let i=0;i<Math.min(oldChecks.length, state.names.length);i++) newChecks[i]=oldChecks[i];
       state.saves[d].checks = newChecks;
       state.saves[d].names = [...state.names];
-      state.saves[d].workedCount = newChecks.filter(v=>v).length;
+      // Recalculate workedCount excluding blank names
+      let wc = 0;
+      for(let i=0; i<state.names.length; i++) {
+        if(!isBlankName(state.names[i]) && newChecks[i]) wc++;
+      }
+      state.saves[d].workedCount = wc;
     } else {
       state.saves[d].names = [...state.names];
-      state.saves[d].workedCount = state.saves[d].checks.filter(v=>v).length;
+      let wc = 0;
+      for(let i=0; i<state.names.length; i++) {
+        if(!isBlankName(state.names[i]) && state.saves[d].checks[i]) wc++;
+      }
+      state.saves[d].workedCount = wc;
     }
   }
   renderWorkers();
   saveFullState();
-  showSuccess("Worker names updated! ☁️");
+  showSuccess("Worker names updated! Blank names are now hidden. ☁️");
 }
 
 function updateDriveUI() {
@@ -442,8 +481,20 @@ function generateDayPDF(dateStr){
   const doc = new jsPDF({ unit:'mm', format:'a4' });
   const save = state.saves[dateStr];
   if(!save) return;
-  const workedNames = save.names.filter((_,i)=> save.checks[i]);
-  const absentNames = save.names.filter((_,i)=> !save.checks[i]);
+  
+  // Filter out blank names for display
+  const visibleIndices = [];
+  const visibleNames = [];
+  for(let i=0; i<save.names.length; i++) {
+    if(!isBlankName(save.names[i])) {
+      visibleIndices.push(i);
+      visibleNames.push(save.names[i]);
+    }
+  }
+  
+  const workedNames = visibleNames.filter((_,idx) => save.checks[visibleIndices[idx]]);
+  const absentNames = visibleNames.filter((_,idx) => !save.checks[visibleIndices[idx]]);
+  
   doc.setFillColor(240,192,64); doc.rect(0,0,210,30,'F');
   doc.setFont('helvetica','bold'); doc.setFontSize(22); doc.setTextColor(0,0,0);
   doc.text('DAILY WORK REPORT', 15, 14);
@@ -460,12 +511,13 @@ function generateDayPDF(dateStr){
   doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(240,192,64);
   doc.text('#',15,y+6.5); doc.text('NAME',25,y+6.5); doc.text('STATUS',155,y+6.5);
   y+=9;
-  save.names.forEach((name,i)=>{
-    const present=save.checks[i];
-    const rowBg = i%2===0 ? [255,255,255]:[248,248,248];
+  visibleNames.forEach((name, idx)=>{
+    const originalIdx = visibleIndices[idx];
+    const present = save.checks[originalIdx];
+    const rowBg = idx%2===0 ? [255,255,255]:[248,248,248];
     doc.setFillColor(...rowBg); doc.rect(10,y,190,9,'F');
     doc.setFont('helvetica','normal'); doc.setFontSize(10); doc.setTextColor(40,40,40);
-    doc.text(String(i+1),15,y+6.5); doc.text(name,25,y+6.5);
+    doc.text(String(idx+1),15,y+6.5); doc.text(name,25,y+6.5);
     if(present){
       doc.setFillColor(76,175,80); doc.roundedRect(150,y+1.5,42,6,1,1,'F');
       doc.setTextColor(255,255,255); doc.setFont('helvetica','bold'); doc.text('✓ WORKED',155,y+6.5);
@@ -490,34 +542,71 @@ function generateMonthlyPDF(monthKey){
   doc.setFont('helvetica','bold'); doc.setFontSize(22); doc.setTextColor(0,0,0);
   doc.text('MONTHLY WORK REPORT', 15, 14);
   doc.setFontSize(12); doc.text(monthName.toUpperCase(), 15, 23);
-  let totalShifts = days.reduce((s,d)=>s+(state.saves[d].workedCount||0),0);
+  let totalShifts = 0;
+  days.forEach(d=>{ totalShifts += (state.saves[d].workedCount || 0); });
   doc.setFillColor(245,245,245); doc.rect(10,35,190,22,'F');
   doc.setFontSize(10); doc.setTextColor(100,100,100);
   doc.text('DAYS',15,43); doc.text('TOTAL SHIFTS',80,43); doc.text('DATE',145,43);
   doc.setFont('helvetica','normal'); doc.setFontSize(12); doc.setTextColor(20,20,20);
   doc.text(String(days.length),15,52); doc.text(String(totalShifts),80,52); doc.text(new Date().toLocaleDateString(),145,52);
+  
+  // Build worker stats with list of dates they worked (day numbers)
   let workerStats = {};
-  state.names.forEach(n=>workerStats[n]=0);
-  days.forEach(d=>{ const s=state.saves[d]; s.names.forEach((n,i)=>{ if(s.checks[i]) workerStats[n]=(workerStats[n]||0)+1; }); });
-  let y=68;
-  doc.setFillColor(30,30,30); doc.rect(10,y,190,9,'F');
-  doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(240,192,64);
-  doc.text('WORKER',15,y+6.5); doc.text('DAYS WORKED',110,y+6.5); doc.text('ATTENDANCE %',155,y+6.5);
-  y+=9;
-  state.names.forEach((name,i)=>{
-    const dw = workerStats[name]||0;
-    const pct = days.length>0 ? Math.round((dw/days.length)*100) : 0;
-    const rowBg = i%2===0 ? [255,255,255]:[248,248,248];
-    doc.setFillColor(...rowBg); doc.rect(10,y,190,9,'F');
-    doc.setFont('helvetica','normal'); doc.setFontSize(10); doc.setTextColor(40,40,40);
-    doc.text(name,15,y+6.5); doc.text(String(dw),110,y+6.5);
-    const barW = Math.min(50, Math.round((pct/100)*50));
-    doc.setFillColor(220,220,220); doc.rect(150,y+2,50,5,'F');
-    if(barW>0){ doc.setFillColor(76,175,80); doc.rect(150,y+2,barW,5,'F'); }
-    doc.text(`${pct}%`,204,y+6.5,{align:'right'});
-    y+=9;
-    if(y>270){ doc.addPage(); y=20; }
+  let workerDates = {};
+  state.names.forEach((n, idx) => {
+    if(!isBlankName(n)) {
+      workerStats[n] = 0;
+      workerDates[n] = [];
+    }
   });
+  
+  days.forEach(d => {
+    const s = state.saves[d];
+    const dayNum = getDayNumber(d);
+    s.names.forEach((n, i) => {
+      if(!isBlankName(n) && s.checks[i]) {
+        workerStats[n] = (workerStats[n] || 0) + 1;
+        if(!workerDates[n]) workerDates[n] = [];
+        if(!workerDates[n].includes(dayNum)) workerDates[n].push(dayNum);
+      }
+    });
+  });
+  
+  // Sort date lists
+  for(let w in workerDates) {
+    workerDates[w].sort((a,b)=>a-b);
+  }
+  
+  let y = 68;
+  doc.setFillColor(30,30,30); doc.rect(10,y,190,9,'F');
+  doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(240,192,64);
+  doc.text('WORKER',15,y+6.5); doc.text('TOTAL',90,y+6.5); doc.text('DATES WORKED (day of month)',110,y+6.5);
+  y+=9;
+  
+  const visibleWorkers = state.names.filter(n => !isBlankName(n));
+  visibleWorkers.forEach((name, idx) => {
+    const dw = workerStats[name] || 0;
+    const datesList = workerDates[name] || [];
+    const datesStr = datesList.join(', ');
+    const rowBg = idx%2===0 ? [255,255,255]:[248,248,248];
+    doc.setFillColor(...rowBg); doc.rect(10,y,190,12,'F');
+    doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(40,40,40);
+    doc.text(name,15,y+5);
+    doc.text(String(dw),90,y+5);
+    doc.text(datesStr || '—',110,y+5);
+    y += 12;
+    if(y > 270) {
+      doc.addPage();
+      y = 20;
+      doc.setFillColor(30,30,30); doc.rect(10,y,190,9,'F');
+      doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(240,192,64);
+      doc.text('WORKER',15,y+6.5); doc.text('TOTAL',90,y+6.5); doc.text('DATES WORKED',110,y+6.5);
+      y+=9;
+    }
+  });
+  
+  doc.setFontSize(9); doc.setTextColor(150,150,150);
+  doc.text('Work Tracker Pro — Monthly Report', 15, 285);
   doc.save(`monthly-${monthKey}.pdf`);
 }
 
